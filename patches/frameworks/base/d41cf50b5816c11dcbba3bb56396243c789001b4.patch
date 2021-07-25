@@ -1,0 +1,192 @@
+From d41cf50b5816c11dcbba3bb56396243c789001b4 Mon Sep 17 00:00:00 2001
+From: Kshitij Gupta <kshitijgm@gmail.com>
+Date: Wed, 10 Jun 2020 14:19:12 +0000
+Subject: [PATCH] WifiManager: Add StaState API [1/2]
+
+Wifi stastate callback functions are refrenced by mediatek ims blobs when they init to register ims-service.
+
+test: IMS services (voLTE and voWIFI) works fine on mtk67xx (begonia) and crashes due to missing stastate callback functions is no more.
+
+- Reversed out from miui_BEGONIAININGlobal_V11.0.2.0.QGGINXM_7e11a54a70_10.0
+
+Change-Id: I7309906d775f45c7ea42b3324679a0f7b776a1c9
+---
+ Android.bp                                    |  1 +
+ .../android/net/wifi/IStaStateCallback.aidl   | 28 ++++++++
+ wifi/java/android/net/wifi/IWifiManager.aidl  |  5 ++
+ wifi/java/android/net/wifi/WifiManager.java   | 65 +++++++++++++++++++
+ .../android/server/wifi/BaseWifiService.java  | 12 ++++
+ 5 files changed, 111 insertions(+)
+ create mode 100644 wifi/java/android/net/wifi/IStaStateCallback.aidl
+
+diff --git a/Android.bp b/Android.bp
+index bdd880346550..e9ede0bdc775 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -642,6 +642,7 @@ java_defaults {
+         "wifi/java/android/net/wifi/INetworkRequestMatchCallback.aidl",
+         "wifi/java/android/net/wifi/INetworkRequestUserSelectionCallback.aidl",
+         "wifi/java/android/net/wifi/ISoftApCallback.aidl",
++        "wifi/java/android/net/wifi/IStaStateCallback.aidl",
+         "wifi/java/android/net/wifi/ITrafficStateCallback.aidl",
+         "wifi/java/android/net/wifi/IWifiManager.aidl",
+         "wifi/java/android/net/wifi/IOnWifiUsabilityStatsListener.aidl",
+diff --git a/wifi/java/android/net/wifi/IStaStateCallback.aidl b/wifi/java/android/net/wifi/IStaStateCallback.aidl
+new file mode 100644
+index 000000000000..fc4bd6c9f22c
+--- /dev/null
++++ b/wifi/java/android/net/wifi/IStaStateCallback.aidl
+@@ -0,0 +1,28 @@
++/*
++ * Copyright (C) 2020 The Potato Open Sauce Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.net.wifi;
++
++/**
++ * @hide
++ */
++oneway interface IStaStateCallback
++{
++   /**
++    * @hide
++    */
++   void onStaToBeOff();
++}
+diff --git a/wifi/java/android/net/wifi/IWifiManager.aidl b/wifi/java/android/net/wifi/IWifiManager.aidl
+index 9010f3c9943e..422365ad7a97 100644
+--- a/wifi/java/android/net/wifi/IWifiManager.aidl
++++ b/wifi/java/android/net/wifi/IWifiManager.aidl
+@@ -27,6 +27,7 @@ import android.net.Network;
+ import android.net.wifi.IDppCallback;
+ import android.net.wifi.INetworkRequestMatchCallback;
+ import android.net.wifi.ISoftApCallback;
++import android.net.wifi.IStaStateCallback;
+ import android.net.wifi.ITrafficStateCallback;
+ import android.net.wifi.IOnWifiUsabilityStatsListener;
+ import android.net.wifi.PasspointManagementObjectDefinition;
+@@ -219,4 +220,8 @@ interface IWifiManager
+     void stopDppSession();
+ 
+     void updateWifiUsabilityScore(int seqNum, int score, int predictionHorizonSec);
++
++    void registerStaStateCallback(in IBinder binder, in IStaStateCallback callback, int callbackIdentifier);
++
++    void unregisterStaStateCallback(int callbackIdentifier);
+ }
+diff --git a/wifi/java/android/net/wifi/WifiManager.java b/wifi/java/android/net/wifi/WifiManager.java
+index a2aadb52cd81..81949b460295 100644
+--- a/wifi/java/android/net/wifi/WifiManager.java
++++ b/wifi/java/android/net/wifi/WifiManager.java
+@@ -4551,6 +4551,71 @@ public void unregisterTrafficStateCallback(@NonNull TrafficStateCallback callbac
+         }
+     }
+ 
++    /**
++     * @hide
++     */
++    public interface StaStateCallback {
++        /**
++         * @hide
++         */
++        void onStaToBeOff();
++    }
++
++    /**
++     * @hide
++     */
++    private class StaStateCallbackProxy extends IStaStateCallback.Stub {
++        private final Handler mHandler;
++        private final StaStateCallback mCallback;
++
++        StaStateCallbackProxy(Looper looper, StaStateCallback callback) {
++            mHandler = new Handler(looper);
++            mCallback = callback;
++        }
++
++        @Override
++        public void onStaToBeOff() {
++            if (mVerboseLoggingEnabled) {
++                Log.v(TAG, "StaStateCallbackProxy: onStaToBeOff");
++            }
++            mHandler.post(() -> {
++                mCallback.onStaToBeOff();
++            });
++        }
++    }
++
++    /**
++     * @hide
++     */
++    public void registerStaStateCallback(@NonNull StaStateCallback callback,
++                                             @Nullable Handler handler) {
++        if (callback == null) throw new IllegalArgumentException("callback cannot be null");
++        Log.v(TAG, "registerStaStateCallback: callback=" + callback + ", handler=" + handler);
++
++        Looper looper = (handler == null) ? mContext.getMainLooper() : handler.getLooper();
++        Binder binder = new Binder();
++        try {
++            mService.registerStaStateCallback(
++                    binder, new StaStateCallbackProxy(looper, callback), callback.hashCode());
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /**
++     * @hide
++     */
++    public void unregisterStaStateCallback(@NonNull StaStateCallback callback) {
++        if (callback == null) throw new IllegalArgumentException("callback cannot be null");
++        Log.v(TAG, "unregisterStaStateCallback: callback=" + callback);
++
++        try {
++            mService.unregisterStaStateCallback(callback.hashCode());
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
+     /**
+      * Helper method to update the local verbose logging flag based on the verbose logging
+      * level from wifi service.
+diff --git a/wifi/java/com/android/server/wifi/BaseWifiService.java b/wifi/java/com/android/server/wifi/BaseWifiService.java
+index fcf8bd5eaa3e..363711f8bf71 100644
+--- a/wifi/java/com/android/server/wifi/BaseWifiService.java
++++ b/wifi/java/com/android/server/wifi/BaseWifiService.java
+@@ -25,6 +25,7 @@
+ import android.net.wifi.INetworkRequestMatchCallback;
+ import android.net.wifi.IOnWifiUsabilityStatsListener;
+ import android.net.wifi.ISoftApCallback;
++import android.net.wifi.IStaStateCallback;
+ import android.net.wifi.ITrafficStateCallback;
+ import android.net.wifi.IWifiManager;
+ import android.net.wifi.ScanResult;
+@@ -481,4 +482,15 @@ public void removeOnWifiUsabilityStatsListener(int listenerIdentifier) {
+     public void updateWifiUsabilityScore(int seqNum, int score, int predictionHorizonSec) {
+         throw new UnsupportedOperationException();
+     }
++
++    @Override
++    public void registerStaStateCallback(
++            IBinder binder, IStaStateCallback callback, int callbackIdentifier) {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public void unregisterStaStateCallback(int callbackIdentifier) {
++        throw new UnsupportedOperationException();
++    }
+ }
